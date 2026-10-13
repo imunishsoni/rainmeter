@@ -64,7 +64,7 @@ private:
 		void STDMETHODCALLTYPE StatusChange() {}
 		void STDMETHODCALLTYPE ScriptCommand(BSTR scType, BSTR Param) {}
 		void STDMETHODCALLTYPE NewStream() {}
-		void STDMETHODCALLTYPE Disconnect(long Result) {}
+		void STDMETHODCALLTYPE Disconnect(long Result);
 		void STDMETHODCALLTYPE Buffering(VARIANT_BOOL Start) {}
 		void STDMETHODCALLTYPE Error() {}
 		void STDMETHODCALLTYPE Warning(long WarningType, long Param, BSTR Description) {}
@@ -91,10 +91,10 @@ private:
 		void STDMETHODCALLTYPE MediaError(IDispatch* pMediaObject) {}
 		void STDMETHODCALLTYPE OpenPlaylistSwitch(IDispatch* pItem) {}
 		void STDMETHODCALLTYPE DomainChange(BSTR strDomain) {}
-		void STDMETHODCALLTYPE SwitchedToPlayerApplication() {}
+		void STDMETHODCALLTYPE SwitchedToPlayerApplication();
 		void STDMETHODCALLTYPE SwitchedToControl();
-		void STDMETHODCALLTYPE PlayerDockedStateChange() {}
-		void STDMETHODCALLTYPE PlayerReconnect() {}
+		void STDMETHODCALLTYPE PlayerDockedStateChange();
+		void STDMETHODCALLTYPE PlayerReconnect();
 		void STDMETHODCALLTYPE Click(short nButton, short nShiftState, long fX, long fY) {}
 		void STDMETHODCALLTYPE DoubleClick(short nButton, short nShiftState, long fX, long fY) {}
 		void STDMETHODCALLTYPE KeyDown(short nKeyCode, short nShiftState) {}
@@ -116,6 +116,9 @@ private:
 	bool m_TrackChanged;
 	HWND m_Window;
 	ULONGLONG m_LastCheckTime;
+	HWND m_LastDiagnosticWindow;
+	int m_LastDiagnosticState;
+	HRESULT m_LastDiagnosticResult;
 
 	Microsoft::WRL::ComPtr<IWMPPlayer4> m_IPlayer;
 	Microsoft::WRL::ComPtr<IWMPControls> m_IControls;

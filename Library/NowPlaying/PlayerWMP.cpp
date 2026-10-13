@@ -58,6 +58,7 @@ PlayerWMP::CRemoteHost::CRemoteHost() :
 
 PlayerWMP::CRemoteHost::~CRemoteHost()
 {
+	LogNotice(L"NowPlaying WMP: Remote host destroyed");
 }
 
 ULONG STDMETHODCALLTYPE PlayerWMP::CRemoteHost::AddRef()
@@ -99,6 +100,9 @@ HRESULT STDMETHODCALLTYPE PlayerWMP::CRemoteHost::QueryInterface(IID const& riid
 	}
 	else
 	{
+		WCHAR iid[40] = {};
+		StringFromGUID2(riid, iid, _countof(iid));
+		LogNoticeF(L"NowPlaying WMP: QueryInterface unsupported IID=%s", iid);
 		*object = nullptr;
 		return E_NOINTERFACE;
 	}
@@ -109,17 +113,25 @@ HRESULT STDMETHODCALLTYPE PlayerWMP::CRemoteHost::QueryInterface(IID const& riid
 
 HRESULT PlayerWMP::CRemoteHost::QueryService(REFGUID guidService, REFIID riid, void** ppv)
 {
-	return QueryInterface(riid, ppv);
+	WCHAR service[40] = {};
+	WCHAR iid[40] = {};
+	StringFromGUID2(guidService, service, _countof(service));
+	StringFromGUID2(riid, iid, _countof(iid));
+	HRESULT hr = QueryInterface(riid, ppv);
+	LogNoticeF(L"NowPlaying WMP: QueryService service=%s, IID=%s, result=0x%08x", service, iid, (UINT)hr);
+	return hr;
 }
 
 HRESULT PlayerWMP::CRemoteHost::GetServiceType(BSTR* pbstrType)
 {
+	LogNotice(L"NowPlaying WMP: GetServiceType requested RemoteNoDialogs");
 	*pbstrType = SysAllocString(L"RemoteNoDialogs");
 	return *pbstrType ? S_OK : E_POINTER;
 }
 
 HRESULT PlayerWMP::CRemoteHost::GetApplicationName(BSTR* pbstrName)
 {
+	LogNotice(L"NowPlaying WMP: GetApplicationName requested");
 	*pbstrName = SysAllocString(L"Rainmeter NowPlaying");
 	return *pbstrName ? S_OK : E_POINTER;
 }
@@ -149,6 +161,7 @@ void PlayerWMP::CRemoteHost::CurrentItemChange(IDispatch* pdispMedia)
 
 void PlayerWMP::CRemoteHost::PlayStateChange(long NewState)
 {
+	LogNoticeF(L"NowPlaying WMP: PlayStateChange state=%ld", NewState);
 	switch (NewState)
 	{
 	case wmppsStopped:
@@ -175,8 +188,29 @@ void PlayerWMP::CRemoteHost::PlayStateChange(long NewState)
 
 void PlayerWMP::CRemoteHost::SwitchedToControl()
 {
+	LogNotice(L"NowPlaying WMP: SwitchedToControl; releasing connection");
 	m_Player->ClearData();
 	m_Player->Uninitialize();
+}
+
+void PlayerWMP::CRemoteHost::Disconnect(long Result)
+{
+	LogNoticeF(L"NowPlaying WMP: Disconnect result=0x%08x", (UINT)Result);
+}
+
+void PlayerWMP::CRemoteHost::SwitchedToPlayerApplication()
+{
+	LogNotice(L"NowPlaying WMP: SwitchedToPlayerApplication");
+}
+
+void PlayerWMP::CRemoteHost::PlayerDockedStateChange()
+{
+	LogNotice(L"NowPlaying WMP: PlayerDockedStateChange");
+}
+
+void PlayerWMP::CRemoteHost::PlayerReconnect()
+{
+	LogNotice(L"NowPlaying WMP: PlayerReconnect");
 }
 
 //
@@ -187,6 +221,9 @@ PlayerWMP::PlayerWMP() : Player(),
 	m_TrackChanged(false),
 	m_Window(nullptr),
 	m_LastCheckTime(0),
+	m_LastDiagnosticWindow(nullptr),
+	m_LastDiagnosticState(-1),
+	m_LastDiagnosticResult(S_OK),
 	m_ConnectionCookie(0)
 {
 }
@@ -209,6 +246,16 @@ Player* PlayerWMP::Create()
 
 void PlayerWMP::Initialize()
 {
+	LogNotice(L"NowPlaying WMP: Initialize started");
+	DWORD playerProcess = 0;
+	HWND playerWindow = FindWindow(L"WMPlayerApp", nullptr);
+	GetWindowThreadProcessId(playerWindow, &playerProcess);
+	DWORD rainmeterSession = 0;
+	DWORD playerSession = 0;
+	BOOL rainmeterSessionFound = ProcessIdToSessionId(GetCurrentProcessId(), &rainmeterSession);
+	BOOL playerSessionFound = ProcessIdToSessionId(playerProcess, &playerSession);
+	LogNoticeF(L"NowPlaying WMP: Rainmeter PID=%lu, session=%lu, session found=%d; player PID=%lu, session=%lu, session found=%d", GetCurrentProcessId(), rainmeterSession, (int)rainmeterSessionFound, playerProcess, playerSession, (int)playerSessionFound);
+	m_LastDiagnosticState = -1;
 	HMODULE atl = InitializeAtlLibrary();
 	if (!atl)
 	{
@@ -238,11 +285,15 @@ void PlayerWMP::Initialize()
 		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
 		m_Window, nullptr, g_Instance, nullptr);
 
+	LogNoticeF(L"NowPlaying WMP: Container window=%p, ATL window=%p", (void*)m_Window, (void*)window);
+
 	Microsoft::WRL::ComPtr<IUnknown> axHost;
 	Microsoft::WRL::ComPtr<IObjectWithSite> hostObject;
+	const WCHAR* stage = L"AtlAxGetHost";
 	HRESULT hr = atlAxGetHost(window, axHost.GetAddressOf());
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Query IObjectWithSite";
 		hr = axHost.As(&hostObject);
 	}
 
@@ -250,46 +301,93 @@ void PlayerWMP::Initialize()
 	if (SUCCEEDED(hr))
 	{
 		remoteHost->m_Player = this;
+		stage = L"SetSite";
 		hr = hostObject->SetSite((IWMPRemoteMediaServices*)remoteHost.Get());
 	}
 
 	Microsoft::WRL::ComPtr<IAxWinHostWindow> axWinHostWindow;
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Query IAxWinHostWindow";
 		hr = axHost.As(&axWinHostWindow);
 	}
 
 	if (SUCCEEDED(hr))
 	{
+		stage = L"CreateControl";
 		hr = axWinHostWindow->CreateControl(L"{6BF52A52-394A-11D3-B153-00C04F79FAA6}", window, nullptr);
 	}
 
 	Microsoft::WRL::ComPtr<IUnknown> axControl;
 	if (SUCCEEDED(hr))
 	{
+		stage = L"AtlAxGetControl";
 		hr = atlAxGetControl(window, axControl.GetAddressOf());
 	}
 
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Query IWMPPlayer4";
 		hr = axControl.As(&m_IPlayer);
+	}
+
+	if (SUCCEEDED(hr))
+	{
+		VARIANT_BOOL remote = VARIANT_FALSE;
+		HRESULT remoteResult = m_IPlayer->get_isRemote(&remote);
+		LogNoticeF(L"NowPlaying WMP: Remote connection remote=%d, result=0x%08x", (int)remote, (UINT)remoteResult);
+		if (SUCCEEDED(remoteResult) && remote != VARIANT_TRUE)
+		{
+			Microsoft::WRL::ComPtr<IWMPError> errors;
+			HRESULT errorResult = m_IPlayer->get_error(errors.GetAddressOf());
+			long count = 0;
+			if (SUCCEEDED(errorResult) && errors)
+			{
+				errorResult = errors->get_errorCount(&count);
+			}
+
+			LogNoticeF(L"NowPlaying WMP: Error queue count=%ld, result=0x%08x", count, (UINT)errorResult);
+			for (long i = 0; i < count; ++i)
+			{
+				Microsoft::WRL::ComPtr<IWMPErrorItem> item;
+				errorResult = errors->get_item(i, item.GetAddressOf());
+				if (SUCCEEDED(errorResult) && item)
+				{
+					long code = 0;
+					BSTR description = nullptr;
+					HRESULT codeResult = item->get_errorCode(&code);
+					HRESULT descriptionResult = item->get_errorDescription(&description);
+					LogWarningF(L"NowPlaying WMP: Error queue item=%ld, code=0x%08x, description=%s, code result=0x%08x, description result=0x%08x", i, (UINT)code, description ? description : L"", (UINT)codeResult, (UINT)descriptionResult);
+					SysFreeString(description);
+				}
+				else
+				{
+					LogWarningF(L"NowPlaying WMP: Cannot read error queue item=%ld, result=0x%08x", i, (UINT)errorResult);
+				}
+			}
+
+			LogWarning(L"NowPlaying WMP: Control is running locally");
+		}
 	}
 
 	// Connect the event interface.
 	Microsoft::WRL::ComPtr<IConnectionPointContainer> wmpPlayerConnectionContainer;
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Query IConnectionPointContainer";
 		hr = m_IPlayer.As(&wmpPlayerConnectionContainer);
 	}
 
 	if (SUCCEEDED(hr))
 	{
+		stage = L"FindConnectionPoint IWMPEvents";
 		hr = wmpPlayerConnectionContainer->FindConnectionPoint(
 			__uuidof(IWMPEvents), m_IConnectionPoint.GetAddressOf());
 	}
 
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Advise IWMPEvents";
 		hr = m_IConnectionPoint->Advise(remoteHost->GetUnknown(), &m_ConnectionCookie);
 		if (!m_ConnectionCookie)
 		{
@@ -299,18 +397,21 @@ void PlayerWMP::Initialize()
 
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Get controls";
 		hr = m_IPlayer->get_controls(&m_IControls);
 	}
 
 	if (SUCCEEDED(hr))
 	{
+		stage = L"Get settings";
 		hr = m_IPlayer->get_settings(&m_ISettings);
 	}
 
 	if (SUCCEEDED(hr))
 	{
-		WMPPlayState state;
-		m_IPlayer->get_playState(&state);
+		WMPPlayState state = wmppsUndefined;
+		HRESULT stateResult = m_IPlayer->get_playState(&state);
+		LogNoticeF(L"NowPlaying WMP: Initial playback state=%d, result=0x%08x", (int)state, (UINT)stateResult);
 		if (state == wmppsPlaying)
 		{
 			m_State = STATE_PLAYING;
@@ -326,41 +427,76 @@ void PlayerWMP::Initialize()
 		}
 
 		m_Initialized = true;
+		LogNoticeF(L"NowPlaying WMP: Initialize completed; connection cookie=%lu", m_ConnectionCookie);
 	}
 	else
 	{
+		LogWarningF(L"NowPlaying WMP: Initialize failed at %s, result=0x%08x", stage, (UINT)hr);
 		Uninitialize();
 	}
 }
 
 void PlayerWMP::Uninitialize()
 {
+	LogNoticeF(L"NowPlaying WMP: Uninitialize started; initialized=%d, cookie=%lu, window=%p", (int)m_Initialized, m_ConnectionCookie, (void*)m_Window);
 	if (m_Initialized)
 	{
 		m_Initialized = false;
 
 		if (m_ConnectionCookie)
 		{
-			m_IConnectionPoint->Unadvise(m_ConnectionCookie);
+			HRESULT hr = m_IConnectionPoint->Unadvise(m_ConnectionCookie);
+			LogNoticeF(L"NowPlaying WMP: Unadvise result=0x%08x", (UINT)hr);
 			m_ConnectionCookie = 0;
 		}
 
+		LogNotice(L"NowPlaying WMP: Releasing controls, settings, connection point and player");
 		m_IControls.Reset();
 		m_ISettings.Reset();
 		m_IConnectionPoint.Reset();
 		m_IPlayer.Reset();
-		DestroyWindow(m_Window);
+		LogNotice(L"NowPlaying WMP: COM interfaces released");
+		BOOL destroyed = DestroyWindow(m_Window);
+		DWORD error = destroyed ? ERROR_SUCCESS : GetLastError();
+		LogNoticeF(L"NowPlaying WMP: DestroyWindow succeeded=%d, error=%lu", (int)destroyed, error);
 		m_Window = nullptr;
 		UnregisterClass(L"NowPlayingWMP", g_Instance);
 	}
+
+	LogNotice(L"NowPlaying WMP: Uninitialize completed");
 }
 
 void PlayerWMP::UpdateData()
 {
 	if (m_Initialized)
 	{
-		if (!FindWindow(L"WMPlayerApp", nullptr))
+		VARIANT_BOOL remote = VARIANT_FALSE;
+		HRESULT remoteResult = m_IPlayer->get_isRemote(&remote);
+		VARIANT_BOOL docked = VARIANT_FALSE;
+		Microsoft::WRL::ComPtr<IWMPPlayerApplication> application;
+		HRESULT hr = m_IPlayer->get_playerApplication(application.GetAddressOf());
+		if (SUCCEEDED(hr) && application)
 		{
+			hr = application->get_playerDocked(&docked);
+		}
+
+		HWND window = FindWindow(L"WMPlayerApp", nullptr);
+		BOOL visible = IsWindowVisible(window);
+		int diagnosticState = (visible ? 1 : 0) | (docked == VARIANT_TRUE ? 2 : 0) | (remote == VARIANT_TRUE ? 4 : 0) | (application ? 8 : 0) | (FAILED(remoteResult) ? 16 : 0);
+		if (window != m_LastDiagnosticWindow || diagnosticState != m_LastDiagnosticState || hr != m_LastDiagnosticResult)
+		{
+			LogNoticeF(L"NowPlaying WMP: Updated remote connection remote=%d, result=0x%08x", (int)remote, (UINT)remoteResult);
+			LogNoticeF(L"NowPlaying WMP: Connection state window=%p, visible=%d, docked=%d, application=%d, result=0x%08x", (void*)window, (int)visible, (int)docked, application ? 1 : 0, (UINT)hr);
+			m_LastDiagnosticWindow = window;
+			m_LastDiagnosticState = diagnosticState;
+			m_LastDiagnosticResult = hr;
+		}
+
+		application.Reset();
+
+		if (!window)
+		{
+			LogNotice(L"NowPlaying WMP: Connection state triggered cleanup");
 			ClearData();
 			Uninitialize();
 			return;
@@ -481,7 +617,17 @@ void PlayerWMP::UpdateData()
 		{
 			m_LastCheckTime = time;
 
-			if (FindWindow(L"WMPlayerApp", nullptr))
+			HWND window = FindWindow(L"WMPlayerApp", nullptr);
+			BOOL visible = IsWindowVisible(window);
+			int diagnosticState = visible ? 1 : 0;
+			if (window != m_LastDiagnosticWindow || diagnosticState != m_LastDiagnosticState)
+			{
+				LogNoticeF(L"NowPlaying WMP: Looking for player window=%p, visible=%d", (void*)window, (int)visible);
+				m_LastDiagnosticWindow = window;
+				m_LastDiagnosticState = diagnosticState;
+			}
+
+			if (window)
 			{
 				Initialize();
 			}
@@ -572,12 +718,15 @@ void PlayerWMP::SetVolume(int volume)
 void PlayerWMP::ClosePlayer()
 {
 	HWND wnd = FindWindow(L"WMPlayerApp", nullptr);
+	LogNoticeF(L"NowPlaying WMP: ClosePlayer requested; window=%p", (void*)wnd);
 
 	if (wnd)
 	{
 		ClearData();
 		Uninitialize();
+		LogNotice(L"NowPlaying WMP: Sending WM_CLOSE");
 		SendMessage(wnd, WM_CLOSE, 0, 0);
+		LogNoticeF(L"NowPlaying WMP: WM_CLOSE returned; window exists=%d, visible=%d", (int)IsWindow(wnd), (int)IsWindowVisible(wnd));
 	}
 }
 
